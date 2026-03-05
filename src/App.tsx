@@ -48,15 +48,62 @@ export default function App() {
   const [aiResponse, setAiResponse] = useState<string | null>(null);
   const [isKeystoreDragOver, setIsKeystoreDragOver] = useState(false);
   const [keystoreFile, setKeystoreFile] = useState<File | null>(null);
+  const [keystoreError, setKeystoreError] = useState<string | null>(null);
+
+  const [newProjectName, setNewProjectName] = useState('');
+  const [newProjectPkg, setNewProjectPkg] = useState('');
+  const [newProjectVer, setNewProjectVer] = useState('1.0.0');
+  const [newProjectCode, setNewProjectCode] = useState('1');
 
   const logsEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (activeModal !== 'keystore') {
-      setKeystoreFile(null);
+    if (activeModal === 'keystore') {
+      if (keystore && keystore.file) {
+        setKeystoreFile(keystore.file);
+      } else {
+        setKeystoreFile(null);
+      }
       setIsKeystoreDragOver(false);
+      setKeystoreError(null);
     }
-  }, [activeModal]);
+  }, [activeModal, keystore]);
+
+  const handleKeystoreFile = async (file: File) => {
+    setKeystoreError(null);
+    
+    if (!file.name.endsWith('.jks') && !file.name.endsWith('.keystore')) {
+      setKeystoreError('Invalid file type. Only .jks and .keystore are allowed.');
+      return;
+    }
+    
+    if (file.size === 0) {
+      setKeystoreError('File is empty or corrupted.');
+      return;
+    }
+
+    try {
+      const buffer = await file.slice(0, 4).arrayBuffer();
+      const view = new DataView(buffer);
+      if (view.byteLength >= 4) {
+        const magic = view.getUint32(0);
+        // JKS magic: 0xFEEDFEED (4276993773)
+        // PKCS12 magic: usually starts with 0x30 (48)
+        if (magic !== 0xFEEDFEED && (magic >>> 24) !== 0x30) {
+          setKeystoreError('Invalid keystore format or corrupted file.');
+          return;
+        }
+      } else {
+        setKeystoreError('File is too small to be a valid keystore.');
+        return;
+      }
+    } catch (e) {
+      setKeystoreError('Failed to read file.');
+      return;
+    }
+
+    setKeystoreFile(file);
+  };
 
   useEffect(() => {
     logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -88,7 +135,11 @@ export default function App() {
     
     addLog('🚀 Starting Gradle build · ' + new Date().toLocaleTimeString(), 'info');
     addLog(`📱 Mode: ${buildMode.toUpperCase()} | Variant: ${buildVariant}`, 'info');
-    if (currentKeystore) addLog(`🔐 Keystore: ${currentKeystore.alias} (OS keychain)`, 'info');
+    if (currentKeystore) {
+      addLog(`🔐 Keystore: ${currentKeystore.alias} (OS keychain)`, 'info');
+      if (currentKeystore.password) addLog(`🔑 Keystore password provided: ***`, 'info');
+      if (currentKeystore.keyPassword) addLog(`🔑 Key password provided: ***`, 'info');
+    }
     
     const steps = buildMode === 'debug'
       ? BUILD_STEPS.filter((_, i) => i !== 11 && i !== 12)
@@ -149,13 +200,27 @@ export default function App() {
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY as string });
       const logText = logs.map(l => `[${l.type.toUpperCase()}] ${l.text}`).join('\n');
       
-      const prompt = `You are an expert Android developer. Analyze the following build logs. 
-If there are errors, explain them and suggest fixes. 
-If it's a successful build, suggest build configuration optimizations (e.g., ProGuard rules, Gradle caching, R8 optimizations).
-Keep your response concise and format it in Markdown.
+      const prompt = `You are an expert Android developer analyzing build logs. 
+
+Please provide your analysis in the following strict Markdown format:
+
+## 📊 Build Summary
+- **Status:** [Success/Failed]
+- **Key Events:** [Brief summary of main build events]
+
+## 🔍 Detailed Analysis
+[Provide a concise explanation of what happened during the build process, focusing on the most critical steps or failures.]
+
+## 💡 Recommendations
+[If failed: Provide step-by-step actionable fixes for the errors.]
+[If successful: Provide 2-3 specific, actionable optimizations for build speed, app size, or security (e.g., specific ProGuard rules, Gradle caching flags, or R8 optimizations).]
+
+Keep your response concise, professional, and directly actionable.
 
 Logs:
-${logText}`;
+\`\`\`
+${logText}
+\`\`\``;
 
       const response = await ai.models.generateContent({
         model: 'gemini-3.1-pro-preview',
@@ -226,17 +291,44 @@ ${logText}`;
             onDragOver={(e) => { e.preventDefault(); setIsDragOver(true); }}
             onDragLeave={() => setIsDragOver(false)}
             onDrop={(e) => { e.preventDefault(); setIsDragOver(false); simulateProjectLoad(); }}
-            onClick={simulateProjectLoad}
+            onClick={() => {
+              if (!isBuilding) {
+                setNewProjectName('');
+                setNewProjectPkg('');
+                setNewProjectVer('1.0.0');
+                setNewProjectCode('1');
+                setActiveModal('new-project');
+              }
+            }}
           >
-            <span className="text-2xl mb-[6px] block">{project ? '📦' : '📁'}</span>
-            <div className="font-mono text-[13px] font-medium mb-1">{project ? project.name : 'Drop Android project folder or click to choose'}</div>
-            <div className="text-[11px] text-vp-text2 mb-2">{project ? project.pkg : 'Looks for /app, Gradle wrapper, and build.gradle'}</div>
-            <div className="flex flex-wrap gap-[6px] text-[10px] font-mono">
-              <span className={`px-2 py-[2px] rounded-md border ${project ? 'text-vp-accent bg-vp-accent/5 border-vp-accent/20' : 'bg-white/5 border-white/5 text-vp-muted'}`}>Package: {project ? project.pkg : '—'}</span>
-              <span className={`px-2 py-[2px] rounded-md border ${project ? 'text-vp-accent bg-vp-accent/5 border-vp-accent/20' : 'bg-white/5 border-white/5 text-vp-muted'}`}>Version: {project ? `${project.ver} (${project.code})` : '—'}</span>
-              <span className="px-2 py-[2px] rounded-md bg-white/5 border border-white/5 text-vp-muted">Module: /app</span>
-              {project && <span className="px-2 py-[2px] rounded-md bg-white/5 border border-white/5 text-vp-muted">Gradle 8.4</span>}
-            </div>
+            {project ? (
+              <div className="flex items-start gap-4">
+                <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-vp-accent/20 to-vp-accent3/20 border border-vp-accent/30 flex items-center justify-center text-2xl shadow-[0_0_15px_rgba(0,255,136,0.15)]">📦</div>
+                <div className="flex flex-col flex-1">
+                  <div className="flex items-center justify-between mb-1">
+                    <div className="font-sans text-[16px] font-bold text-vp-text tracking-tight">{project.name}</div>
+                    <div className="px-2 py-1 rounded bg-vp-accent/10 border border-vp-accent/20 text-vp-accent font-mono text-[10px] font-bold">v{project.ver}</div>
+                  </div>
+                  <div className="font-mono text-[11px] text-vp-text2 mb-3">{project.pkg}</div>
+                  <div className="flex flex-wrap gap-2 text-[10px] font-mono">
+                    <span className="px-2 py-[2px] rounded-md bg-white/5 border border-white/10 text-vp-text2">Code: <span className="text-vp-text">{project.code}</span></span>
+                    <span className="px-2 py-[2px] rounded-md bg-white/5 border border-white/10 text-vp-text2">Module: <span className="text-vp-text">/app</span></span>
+                    <span className="px-2 py-[2px] rounded-md bg-white/5 border border-white/10 text-vp-text2">Gradle <span className="text-vp-text">8.4</span></span>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <>
+                <span className="text-2xl mb-[6px] block">📁</span>
+                <div className="font-mono text-[13px] font-medium mb-1">Drop Android project folder or click to choose</div>
+                <div className="text-[11px] text-vp-text2 mb-2">Looks for /app, Gradle wrapper, and build.gradle</div>
+                <div className="flex flex-wrap gap-[6px] text-[10px] font-mono">
+                  <span className="px-2 py-[2px] rounded-md bg-white/5 border border-white/5 text-vp-muted">Package: —</span>
+                  <span className="px-2 py-[2px] rounded-md bg-white/5 border border-white/5 text-vp-muted">Version: —</span>
+                  <span className="px-2 py-[2px] rounded-md bg-white/5 border border-white/5 text-vp-muted">Module: /app</span>
+                </div>
+              </>
+            )}
           </div>
           
           <div className="flex items-end gap-[10px]">
@@ -370,6 +462,103 @@ ${logText}`;
         </section>
       </main>
 
+      {activeModal === 'new-project' && (
+        <div className="fixed inset-0 bg-black/85 flex items-center justify-center z-[9999] animate-fade-in" onClick={(e) => { if (e.target === e.currentTarget) setActiveModal(null); }}>
+          <div className="w-[480px] max-w-[92vw] rounded-[18px] bg-[radial-gradient(circle_at_top,#131526,#060919)] border border-white/10 p-6 font-mono animate-modal-in shadow-[0_40px_100px_rgba(0,0,0,0.8)]">
+            <div className="text-[15px] font-bold uppercase tracking-[0.14em] mb-1 text-vp-accent">📦 Load Project</div>
+            <div className="text-[11px] text-vp-text2 mb-5 leading-[1.6]">
+              Specify the details of the Android project you want to build.
+            </div>
+            
+            <div className="flex flex-col gap-3 mb-5">
+              <div className="flex flex-col gap-1">
+                <label className="text-[9px] uppercase tracking-[0.14em] text-vp-muted">App Name</label>
+                <input 
+                  type="text" 
+                  placeholder="e.g. TaskFlow Pro" 
+                  value={newProjectName}
+                  onChange={e => setNewProjectName(e.target.value)}
+                  className="px-[11px] py-[9px] rounded-[9px] border border-white/5 bg-[#050814]/98 text-vp-text font-mono text-[11px] outline-none transition-colors duration-150 focus:border-vp-accent/40 focus:shadow-[0_0_0_2px_rgba(0,255,136,0.07)]" 
+                />
+              </div>
+              <div className="flex flex-col gap-1">
+                <label className="text-[9px] uppercase tracking-[0.14em] text-vp-muted">Package Name</label>
+                <input 
+                  type="text" 
+                  placeholder="e.g. com.acme.taskflow" 
+                  value={newProjectPkg}
+                  onChange={e => setNewProjectPkg(e.target.value)}
+                  className="px-[11px] py-[9px] rounded-[9px] border border-white/5 bg-[#050814]/98 text-vp-text font-mono text-[11px] outline-none transition-colors duration-150 focus:border-vp-accent/40 focus:shadow-[0_0_0_2px_rgba(0,255,136,0.07)]" 
+                />
+              </div>
+              <div className="flex gap-[10px]">
+                <div className="flex-1 flex flex-col gap-1">
+                  <label className="text-[9px] uppercase tracking-[0.14em] text-vp-muted">Version Name</label>
+                  <input 
+                    type="text" 
+                    placeholder="1.0.0" 
+                    value={newProjectVer}
+                    onChange={e => setNewProjectVer(e.target.value)}
+                    className="px-[11px] py-[9px] rounded-[9px] border border-white/5 bg-[#050814]/98 text-vp-text font-mono text-[11px] outline-none transition-colors duration-150 focus:border-vp-accent/40 focus:shadow-[0_0_0_2px_rgba(0,255,136,0.07)]" 
+                  />
+                </div>
+                <div className="flex-1 flex flex-col gap-1">
+                  <label className="text-[9px] uppercase tracking-[0.14em] text-vp-muted">Version Code</label>
+                  <input 
+                    type="number" 
+                    placeholder="1" 
+                    value={newProjectCode}
+                    onChange={e => setNewProjectCode(e.target.value)}
+                    className="px-[11px] py-[9px] rounded-[9px] border border-white/5 bg-[#050814]/98 text-vp-text font-mono text-[11px] outline-none transition-colors duration-150 focus:border-vp-accent/40 focus:shadow-[0_0_0_2px_rgba(0,255,136,0.07)]" 
+                  />
+                </div>
+              </div>
+            </div>
+            
+            <div className="flex gap-2 mt-[18px]">
+              <button 
+                onClick={() => {
+                  if (!newProjectName || !newProjectPkg) return;
+                  const newProj = {
+                    name: newProjectName,
+                    pkg: newProjectPkg,
+                    ver: newProjectVer || '1.0.0',
+                    code: parseInt(newProjectCode) || 1
+                  };
+                  setProject(newProj);
+                  setLogs([]);
+                  addLog('Project attached: /projects/' + newProj.name.replace(' ', ''), 'ok');
+                  addLog('Gradle wrapper found: gradle-8.4-bin.zip', 'info');
+                  addLog('Build variants detected: debug, release', 'info');
+                  setStatusText('Ready · ' + newProj.pkg);
+                  setStatusActive(false);
+                  setActiveModal(null);
+                }}
+                disabled={!newProjectName || !newProjectPkg}
+                className="flex-1 p-[10px] rounded-[10px] border border-vp-accent/50 bg-vp-accent/15 text-vp-accent font-mono text-[11px] font-medium cursor-pointer transition-colors duration-150 uppercase tracking-[0.1em] hover:bg-vp-accent/25 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Load Project
+              </button>
+              <button 
+                onClick={() => {
+                  simulateProjectLoad();
+                  setActiveModal(null);
+                }}
+                className="flex-1 p-[10px] rounded-[10px] border border-white/10 bg-[#080a18]/98 text-vp-text2 font-mono text-[11px] font-medium cursor-pointer transition-colors duration-150 uppercase tracking-[0.1em] hover:border-white/15 hover:text-vp-text"
+              >
+                Load Random
+              </button>
+              <button 
+                onClick={() => setActiveModal(null)}
+                className="flex-1 p-[10px] rounded-[10px] border border-white/10 bg-[#080a18]/98 text-vp-text2 font-mono text-[11px] font-medium cursor-pointer transition-colors duration-150 uppercase tracking-[0.1em] hover:border-white/15 hover:text-vp-text"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {activeModal === 'keystore' && (
         <div className="fixed inset-0 bg-black/85 flex items-center justify-center z-[9999] animate-fade-in" onClick={(e) => { if (e.target === e.currentTarget) setActiveModal(null); }}>
           <div className="w-[480px] max-w-[92vw] rounded-[18px] bg-[radial-gradient(circle_at_top,#131526,#060919)] border border-white/10 p-6 font-mono animate-modal-in shadow-[0_40px_100px_rgba(0,0,0,0.8)]">
@@ -387,7 +576,7 @@ ${logText}`;
                   e.preventDefault(); 
                   setIsKeystoreDragOver(false); 
                   if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-                    setKeystoreFile(e.dataTransfer.files[0]);
+                    handleKeystoreFile(e.dataTransfer.files[0]);
                   }
                 }}
               >
@@ -400,32 +589,50 @@ ${logText}`;
                     id="ks-file-input"
                     onChange={(e) => {
                       if (e.target.files && e.target.files.length > 0) {
-                        setKeystoreFile(e.target.files[0]);
+                        handleKeystoreFile(e.target.files[0]);
                       }
                     }}
                   />
                   <label htmlFor="ks-file-input" className="px-[10px] py-1 rounded-md border border-vp-accent2/30 bg-vp-accent2/15 text-vp-accent2 font-mono text-[10px] cursor-pointer hover:bg-vp-accent2/25 transition-colors whitespace-nowrap">
                     Choose File
                   </label>
-                  <span className="text-[10px] text-vp-text font-mono truncate max-w-[150px]">
-                    {keystoreFile ? keystoreFile.name : 'Or drag & drop here'}
+                  <span className={`text-[10px] font-mono truncate max-w-[150px] ${keystoreError ? 'text-vp-accent2' : 'text-vp-text'}`}>
+                    {keystoreError ? keystoreError : (keystoreFile ? keystoreFile.name : 'Or drag & drop here')}
                   </span>
+                  {keystoreFile && !keystoreError && (
+                    <button 
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        const url = URL.createObjectURL(keystoreFile);
+                        const a = document.createElement('a');
+                        a.href = url;
+                        a.download = keystoreFile.name;
+                        document.body.appendChild(a);
+                        a.click();
+                        document.body.removeChild(a);
+                        URL.revokeObjectURL(url);
+                      }}
+                      className="ml-auto px-2 py-1 rounded bg-white/5 border border-white/10 text-vp-text2 hover:text-vp-text hover:bg-white/10 text-[9px] uppercase tracking-[0.1em] transition-colors"
+                    >
+                      Export
+                    </button>
+                  )}
                 </div>
               </div>
               <div className="flex-1 flex flex-col gap-1">
                 <label className="text-[9px] uppercase tracking-[0.14em] text-vp-muted">Key alias</label>
-                <input type="text" placeholder="my-key-alias" defaultValue="upload-key" id="ks-alias" className="px-[11px] py-[9px] rounded-[9px] border border-white/5 bg-[#050814]/98 text-vp-text font-mono text-[11px] outline-none transition-colors duration-150 focus:border-vp-accent/40 focus:shadow-[0_0_0_2px_rgba(0,255,136,0.07)]" />
+                <input type="text" placeholder="my-key-alias" defaultValue={keystore?.alias || "upload-key"} id="ks-alias" className="px-[11px] py-[9px] rounded-[9px] border border-white/5 bg-[#050814]/98 text-vp-text font-mono text-[11px] outline-none transition-colors duration-150 focus:border-vp-accent/40 focus:shadow-[0_0_0_2px_rgba(0,255,136,0.07)]" />
               </div>
             </div>
             
             <div className="flex gap-[10px] mb-[10px]">
               <div className="flex-1 flex flex-col gap-1">
                 <label className="text-[9px] uppercase tracking-[0.14em] text-vp-muted">Keystore password</label>
-                <input type="password" placeholder="••••••••" defaultValue="android" className="px-[11px] py-[9px] rounded-[9px] border border-white/5 bg-[#050814]/98 text-vp-text font-mono text-[11px] outline-none transition-colors duration-150 focus:border-vp-accent/40 focus:shadow-[0_0_0_2px_rgba(0,255,136,0.07)]" />
+                <input type="password" placeholder="••••••••" defaultValue={keystore?.password || "android"} id="ks-pass" className="px-[11px] py-[9px] rounded-[9px] border border-white/5 bg-[#050814]/98 text-vp-text font-mono text-[11px] outline-none transition-colors duration-150 focus:border-vp-accent/40 focus:shadow-[0_0_0_2px_rgba(0,255,136,0.07)]" />
               </div>
               <div className="flex-1 flex flex-col gap-1">
                 <label className="text-[9px] uppercase tracking-[0.14em] text-vp-muted">Key password</label>
-                <input type="password" placeholder="••••••••" defaultValue="android" className="px-[11px] py-[9px] rounded-[9px] border border-white/5 bg-[#050814]/98 text-vp-text font-mono text-[11px] outline-none transition-colors duration-150 focus:border-vp-accent/40 focus:shadow-[0_0_0_2px_rgba(0,255,136,0.07)]" />
+                <input type="password" placeholder="••••••••" defaultValue={keystore?.keyPassword || "android"} id="ks-key-pass" className="px-[11px] py-[9px] rounded-[9px] border border-white/5 bg-[#050814]/98 text-vp-text font-mono text-[11px] outline-none transition-colors duration-150 focus:border-vp-accent/40 focus:shadow-[0_0_0_2px_rgba(0,255,136,0.07)]" />
               </div>
             </div>
             
@@ -437,9 +644,11 @@ ${logText}`;
               <button 
                 onClick={() => {
                   const alias = (document.getElementById('ks-alias') as HTMLInputElement)?.value || 'upload-key';
-                  setKeystore({ alias, path: '/keystore/release.jks' });
+                  const password = (document.getElementById('ks-pass') as HTMLInputElement)?.value || 'android';
+                  const keyPassword = (document.getElementById('ks-key-pass') as HTMLInputElement)?.value || 'android';
+                  setKeystore({ alias, password, keyPassword, path: '/keystore/release.jks', file: keystoreFile });
                   setActiveModal(null);
-                  executeBuild('release', variant, project || SAMPLE_PACKAGES[0], { alias, path: '/keystore/release.jks' });
+                  executeBuild('release', variant, project || SAMPLE_PACKAGES[0], { alias, password, keyPassword, path: '/keystore/release.jks', file: keystoreFile });
                 }}
                 className="flex-1 p-[10px] rounded-[10px] border border-vp-accent2/50 bg-vp-accent2/15 text-vp-accent2 font-mono text-[11px] font-medium cursor-pointer transition-colors duration-150 uppercase tracking-[0.1em] hover:bg-vp-accent2/25"
               >
@@ -527,7 +736,8 @@ ${logText}`;
             {keystore ? (
               <div className="p-[14px] rounded-[10px] bg-vp-accent2/5 border border-vp-accent2/20">
                 <div className="text-[11px] text-vp-accent2 font-semibold mb-1">🔐 Keystore Active</div>
-                <div className="text-[10px] text-vp-text2 mb-[10px]">/keystore/release.jks · alias: {keystore.alias}</div>
+                <div className="text-[10px] text-vp-text2 mb-[4px]">/keystore/release.jks · alias: {keystore.alias}</div>
+                <div className="text-[10px] text-vp-text2 mb-[10px]">Passwords: {keystore.password ? 'Stored' : 'Missing'}</div>
                 <div className="flex gap-[6px]">
                   <button 
                     onClick={() => {
